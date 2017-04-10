@@ -252,7 +252,8 @@ class device:
         except socket.timeout:
           if (time.time() - starttime) < self.timeout:
             pass
-          raise
+          else:
+            raise
     return bytearray(response[0])
 
 
