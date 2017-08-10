@@ -1,10 +1,15 @@
 #!/usr/bin/python
 
 from datetime import datetime
-from Crypto.Cipher import AES
+try:
+    from Crypto.Cipher import AES
+except ImportError as e:
+    import pyaes
+
 import time
 import random
 import socket
+import sys
 import threading
 
 def gendevice(devtype, host, mac):
@@ -145,6 +150,29 @@ class device:
     self.type = "Unknown"
     self.lock = threading.Lock()
 
+    if 'pyaes' in sys.modules:
+        self.encrypt = self.encrypt_pyaes
+        self.decrypt = self.decrypt_pyaes
+    else:
+        self.encrypt = self.encrypt_pycrypto
+        self.decrypt = self.decrypt_pycrypto
+
+  def encrypt_pyaes(self, payload):
+    aes = pyaes.AESModeOfOperationCBC(self.key, iv = bytes(self.iv))
+    return "".join([aes.encrypt(bytes(payload[i:i+16])) for i in range(0, len(payload), 16)])
+
+  def decrypt_pyaes(self, payload):
+    aes = pyaes.AESModeOfOperationCBC(self.key, iv = bytes(self.iv))
+    return "".join([aes.decrypt(bytes(payload[i:i+16])) for i in range(0, len(payload), 16)])
+
+  def encrypt_pycrypto(self, payload):
+    aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
+    return aes.encrypt(bytes(payload))
+
+  def decrypt_pycrypto(self, payload):
+    aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
+    return aes.decrypt(bytes(payload))
+
   def auth(self):
     payload = bytearray(0x50)
     payload[0x04] = 0x31
@@ -174,10 +202,7 @@ class device:
 
     response = self.send_packet(0x65, payload)
 
-    enc_payload = response[0x38:]
-
-    aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
-    payload = aes.decrypt(bytes(enc_payload))
+    payload = self.decrypt(response[0x38:])
 
     if not payload:
      return False
@@ -220,13 +245,17 @@ class device:
     packet[0x32] = self.id[2]
     packet[0x33] = self.id[3]
 
+    # pad the payload for AES encryption
+    if len(payload)>0:
+      numpad=(len(payload)//16+1)*16
+      payload=payload.ljust(numpad,b"\x00")
+
     checksum = 0xbeaf
     for i in range(len(payload)):
       checksum += payload[i]
       checksum = checksum & 0xffff
 
-    aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
-    payload = aes.encrypt(bytes(payload))
+    payload = self.encrypt(payload)
 
     packet[0x34] = checksum & 0xff
     packet[0x35] = checksum >> 8
@@ -250,9 +279,7 @@ class device:
           response = self.cs.recvfrom(1024)
           break
         except socket.timeout:
-          if (time.time() - starttime) < self.timeout:
-            pass
-          else:
+          if (time.time() - starttime) > self.timeout:
             raise
     return bytearray(response[0])
 
@@ -302,8 +329,7 @@ class mp1(device):
     response = self.send_packet(0x6a, packet)
     err = response[0x22] | (response[0x23] << 8)
     if err == 0:
-      aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
-      payload = aes.decrypt(bytes(response[0x38:]))
+      payload = self.decrypt(bytes(response[0x38:]))
       if type(payload[0x4]) == int:
         state = payload[0x0e]
       else:
@@ -351,9 +377,12 @@ class sp2(device):
     response = self.send_packet(0x6a, packet)
     err = response[0x22] | (response[0x23] << 8)
     if err == 0:
-      aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
-      payload = aes.decrypt(bytes(response[0x38:]))
-      return bool(payload[0x4])
+      payload = self.decrypt(bytes(response[0x38:]))
+      if type(payload[0x4]) == int:
+        state = bool(payload[0x4])
+      else:
+        state = bool(ord(payload[0x4]))
+      return state
 
 class a1(device):
   def __init__ (self, host, mac):
@@ -367,8 +396,7 @@ class a1(device):
     err = response[0x22] | (response[0x23] << 8)
     if err == 0:
       data = {}
-      aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
-      payload = aes.decrypt(bytes(response[0x38:]))
+      payload = self.decrypt(bytes(response[0x38:]))
       if type(payload[0x4]) == int:
         data['temperature'] = (payload[0x4] * 10 + payload[0x5]) / 10.0
         data['humidity'] = (payload[0x6] * 10 + payload[0x7]) / 10.0
@@ -418,8 +446,7 @@ class a1(device):
     err = response[0x22] | (response[0x23] << 8)
     if err == 0:
       data = {}
-      aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
-      payload = aes.decrypt(bytes(response[0x38:]))
+      payload = self.decrypt(bytes(response[0x38:]))
       if type(payload[0x4]) == int:
         data['temperature'] = (payload[0x4] * 10 + payload[0x5]) / 10.0
         data['humidity'] = (payload[0x6] * 10 + payload[0x7]) / 10.0
@@ -446,8 +473,7 @@ class rm(device):
     response = self.send_packet(0x6a, packet)
     err = response[0x22] | (response[0x23] << 8)
     if err == 0:
-      aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
-      payload = aes.decrypt(bytes(response[0x38:]))
+      payload = self.decrypt(bytes(response[0x38:]))
       return payload[0x04:]
 
   def send_data(self, data):
@@ -466,8 +492,7 @@ class rm(device):
     response = self.send_packet(0x6a, packet)
     err = response[0x22] | (response[0x23] << 8)
     if err == 0:
-      aes = AES.new(bytes(self.key), AES.MODE_CBC, bytes(self.iv))
-      payload = aes.decrypt(bytes(response[0x38:]))
+      payload = self.decrypt(bytes(response[0x38:]))
       if type(payload[0x4]) == int:
         temp = (payload[0x4] * 10 + payload[0x5]) / 10.0
       else:
@@ -483,3 +508,40 @@ class rm2(rm):
     dev = discover()
     self.host = dev.host
     self.mac = dev.mac
+
+# Setup a new Broadlink device via AP Mode. Review the README to see how to enter AP Mode.
+# Only tested with Broadlink RM3 Mini (Blackbean)
+def setup(ssid, password, security_mode):
+  # Security mode options are (0 - none, 1 = WEP, 2 = WPA1, 3 = WPA2, 4 = WPA1/2)
+  payload = bytearray(0x88)
+  payload[0x26] = 0x14  # This seems to always be set to 14
+  # Add the SSID to the payload
+  ssid_start = 68
+  ssid_length = 0
+  for letter in ssid:
+    payload[(ssid_start + ssid_length)] = ord(letter)
+    ssid_length += 1
+  # Add the WiFi password to the payload
+  pass_start = 100
+  pass_length = 0
+  for letter in password:
+    payload[(pass_start + pass_length)] = ord(letter)
+    pass_length += 1
+
+  payload[0x84] = ssid_length  # Character length of SSID
+  payload[0x85] = pass_length  # Character length of password
+  payload[0x86] = security_mode  # Type of encryption (00 - none, 01 = WEP, 02 = WPA1, 03 = WPA2, 04 = WPA1/2)
+
+  checksum = 0xbeaf
+  for i in range(len(payload)):
+    checksum += payload[i]
+    checksum = checksum & 0xffff
+
+  payload[0x20] = checksum & 0xff  # Checksum 1 position
+  payload[0x21] = checksum >> 8  # Checksum 2 position
+
+  sock = socket.socket(socket.AF_INET,  # Internet
+                       socket.SOCK_DGRAM)  # UDP
+  sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+  sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+  sock.sendto(payload, ('255.255.255.255', 80))
